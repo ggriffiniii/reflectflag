@@ -17,16 +17,38 @@ func ptrTo(x interface{}) interface{} {
 	return v.Interface()
 }
 
-func derefEqual(a, b interface{}) bool {
-	av := reflect.ValueOf(a)
-	bv := reflect.ValueOf(b)
-	for av.Kind() == reflect.Ptr && !av.IsNil() {
-		av = av.Elem()
+// deepEqual is a "simple" implementation of a recusive comparison, where
+// pointers are considered equal if the dereferenced contents are equal. This
+// is only intended to work for the types used in this test and is not a
+// general purpose utility.
+func deepEqual(a, b interface{}) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	for bv.Kind() == reflect.Ptr && !bv.IsNil() {
-		bv = bv.Elem()
+	va := reflect.ValueOf(a)
+	vb := reflect.ValueOf(b)
+	if !va.IsValid() || !vb.IsValid() {
+		return va.IsValid() == vb.IsValid()
 	}
-	return reflect.DeepEqual(av.Interface(), bv.Interface())
+	if va.Type() != vb.Type() {
+		return false
+	}
+	switch va.Kind() {
+	case reflect.Ptr:
+		return deepEqual(va.Elem().Interface(), vb.Elem().Interface())
+	case reflect.Struct:
+		typ := va.Type()
+		for i := 0; i < typ.NumField(); i++ {
+			if typ.Field(i).PkgPath != "" {
+				continue  // skip unexported fields
+			}
+			if !deepEqual(va.Field(i).Interface(), vb.Field(i).Interface()) {
+				return false
+			}
+		}
+		return true
+	}
+	return a == b
 }
 
 type nested struct {
@@ -85,24 +107,29 @@ func (c *customFlag) Get() interface{} {
 	return c.t
 }
 
-type registerCase struct {
+type testCase struct {
 	desc            string
 	testStruct      interface{}
 	wantRegisterErr error
 	wantPreParse    map[string]interface{}
 	args            []string
 	wantParseErr    error
-	wantPostParse   map[string]interface{}
+	wantStruct	interface{}
+	wantLoadErr error
 	opts []Option
 }
 
-func runRegisterCase(tc registerCase) error {
+func runTestCase(tc testCase) error {
 	var b bytes.Buffer
 	flags := flag.NewFlagSet("testflags", flag.ContinueOnError)
 	flags.SetOutput(&b)
 
-	if err := RegisterFlags(flags, tc.testStruct, tc.opts...); fmt.Sprintf("%v", err) != fmt.Sprintf("%v", tc.wantRegisterErr) {
+	err := RegisterFlags(flags, tc.testStruct, tc.opts...)
+	if fmt.Sprintf("%v", err) != fmt.Sprintf("%v", tc.wantRegisterErr) {
 		return fmt.Errorf("unexpected return from RegisterFlags; got %v want %v", err, tc.wantRegisterErr)
+	}
+	if err != nil {
+		return nil
 	}
 	for name, value := range tc.wantPreParse {
 		f := flags.Lookup(name)
@@ -110,34 +137,33 @@ func runRegisterCase(tc registerCase) error {
 			return fmt.Errorf("Missing flag. Expected to find %s", name)
 		}
 		v := f.Value.(flag.Getter).Get()
-		if !derefEqual(v, value) {
+		if !deepEqual(v, value) {
 			return fmt.Errorf("Mismatched default flag value for flag %s; got %v want %v", name, v, value)
 		}
 	}
-	err := flags.Parse(tc.args)
+	err = flags.Parse(tc.args)
 	if fmt.Sprintf("%v", err) != fmt.Sprintf("%v", tc.wantParseErr) {
 		return fmt.Errorf("unexpected return from flags.Parse; got %v want %v", err, tc.wantParseErr)
 	}
 	if err != nil {
 		return nil
 	}
-	for name, value := range tc.wantPostParse {
-		f := flags.Lookup(name)
-		if f == nil {
-			return fmt.Errorf("Missing flag. Expected to find %s", name)
-		}
-		v := f.Value.(flag.Getter).Get()
-		if !derefEqual(v, value) {
-			return fmt.Errorf("Mismatched flag value for flag %s; got %v want %v", name, v, value)
-		}
+	out := reflect.New(reflect.TypeOf(tc.testStruct))
+	err = LoadFromFlags(flags, out.Interface(), tc.opts...)
+	if fmt.Sprintf("%v", err) != fmt.Sprintf("%v", tc.wantLoadErr) {
+		return fmt.Errorf("unexpected return from LoadFromFlags; got %v want %v", err, tc.wantLoadErr)
+	}
+	if err != nil {
+		return nil
+	}
+	result := out.Elem().Interface()
+	if !deepEqual(result, tc.wantStruct) {
+		return fmt.Errorf("unexpected output from LoadFromFlags; got %#v want %#v", result, tc.wantStruct)
 	}
 	return nil
 }
 
-var tests []registerCase = []registerCase{
-	{
-		desc: "all types",
-		testStruct: struct {
+type allTypesStruct struct {
 			BoolFlag        bool           `flag:"bool"`
 			BoolPtrFlag     *bool          `flag:"bool_ptr"`
 			IntFlag         int            `flag:"int"`
@@ -160,7 +186,12 @@ var tests []registerCase = []registerCase{
 			StrPtrFlag      *string        `flag:"str_ptr"`
 			DurationFlag    time.Duration  `flag:"duration"`
 			DurationPtrFlag *time.Duration `flag:"duration_ptr"`
-		}{
+		}
+
+var tests []testCase = []testCase{
+	{
+		desc: "all types",
+		testStruct: allTypesStruct{
 			BoolFlag:        true,
 			BoolPtrFlag:     new(bool),
 			IntFlag:         1,
@@ -188,25 +219,25 @@ var tests []registerCase = []registerCase{
 			"bool":         true,
 			"bool_ptr":     false,
 			"int":          int(1),
-			"int_ptr":      ptrTo(int(2)),
+			"int_ptr":      int(2),
 			"int32":        int32(3),
-			"int32_ptr":    ptrTo(int32(4)),
+			"int32_ptr":    int32(4),
 			"int64":        int64(5),
-			"int64_ptr":    ptrTo(int64(6)),
+			"int64_ptr":    int64(6),
 			"uint":         uint(7),
-			"uint_ptr":     ptrTo(uint(8)),
+			"uint_ptr":     uint(8),
 			"uint32":       uint32(9),
-			"uint32_ptr":   ptrTo(uint32(10)),
+			"uint32_ptr":   uint32(10),
 			"uint64":       uint64(11),
-			"uint64_ptr":   ptrTo(uint64(12)),
+			"uint64_ptr":   uint64(12),
 			"float32":      float32(13),
-			"float32_ptr":  ptrTo(float32(14)),
+			"float32_ptr":  float32(14),
 			"float64":      float64(15),
-			"float64_ptr":  ptrTo(float64(16)),
+			"float64_ptr":  float64(16),
 			"str":          "init",
-			"str_ptr":      ptrTo("init_ptr"),
+			"str_ptr":      "init_ptr",
 			"duration":     1 * time.Second,
-			"duration_ptr": ptrTo(2 * time.Second),
+			"duration_ptr": 2 * time.Second,
 		},
 		args: []string{
 			"--bool=false",
@@ -232,29 +263,29 @@ var tests []registerCase = []registerCase{
 			"--duration=1m",
 			"--duration_ptr=1h",
 		},
-		wantPostParse: map[string]interface{}{
-			"bool":         false,
-			"bool_ptr":     true,
-			"int":          int(100),
-			"int_ptr":      ptrTo(int(101)),
-			"int32":        int32(102),
-			"int32_ptr":    ptrTo(int32(103)),
-			"int64":        int64(104),
-			"int64_ptr":    ptrTo(int64(105)),
-			"uint":         uint(106),
-			"uint_ptr":     ptrTo(uint(107)),
-			"uint32":       uint32(108),
-			"uint32_ptr":   ptrTo(uint32(109)),
-			"uint64":       uint64(110),
-			"uint64_ptr":   ptrTo(uint64(111)),
-			"float32":      float32(112),
-			"float32_ptr":  ptrTo(float32(113)),
-			"float64":      float64(114),
-			"float64_ptr":  ptrTo(float64(115)),
-			"str":          "parsed",
-			"str_ptr":      ptrTo("parsedPtr"),
-			"duration":     1 * time.Minute,
-			"duration_ptr": ptrTo(1 * time.Hour),
+		wantStruct: allTypesStruct{
+			BoolFlag:        false,
+			BoolPtrFlag:     ptrTo(true).(*bool),
+			IntFlag:         100,
+			IntPtrFlag:      ptrTo(int(101)).(*int),
+			Int32Flag:       102,
+			Int32PtrFlag:    ptrTo(int32(103)).(*int32),
+			Int64Flag:       104,
+			Int64PtrFlag:    ptrTo(int64(105)).(*int64),
+			UintFlag:        106,
+			UintPtrFlag:     ptrTo(uint(107)).(*uint),
+			Uint32Flag:      108,
+			Uint32PtrFlag:   ptrTo(uint32(109)).(*uint32),
+			Uint64Flag:      110,
+			Uint64PtrFlag:   ptrTo(uint64(111)).(*uint64),
+			Float32Flag:     112,
+			Float32PtrFlag:  ptrTo(float32(113)).(*float32),
+			Float64Flag:     114,
+			Float64PtrFlag:  ptrTo(float64(115)).(*float64),
+			StrFlag:         "parsed",
+			StrPtrFlag:      ptrTo("parsedPtr").(*string),
+			DurationFlag:    1 * time.Minute,
+			DurationPtrFlag: ptrTo(1 * time.Hour).(*time.Duration),
 		},
 	},
 	{
@@ -289,9 +320,18 @@ var tests []registerCase = []registerCase{
 			"--field1=newfield1_value",
 			"--nested_flag=newnested_field_value",
 		},
-		wantPostParse: map[string]interface{}{
-			"field1":      "newfield1_value",
-			"nested_flag": "newnested_field_value",
+		wantStruct: struct {
+			Field1 string `flag:"field1"`
+			Nested nested
+		}{
+			Field1: "newfield1_value",
+			Nested: nested{
+				Nested: nested1{
+					Nested: nested2{
+						Field: "newnested_field_value",
+					},
+				},
+			},
 		},
 	},
 	{
@@ -377,8 +417,10 @@ var tests []registerCase = []registerCase{
 		args: []string{
 			"--custom=bar",
 		},
-		wantPostParse: map[string]interface{}{
-			"custom":      newCustomType("bar"),
+		wantStruct: struct{
+			S *customType `flag:"custom"`
+		}{
+			S: newCustomType("bar"),
 		},
 		opts: []Option{FlagType(new(customType), newCustomFlag)},
 	},
@@ -395,8 +437,10 @@ var tests []registerCase = []registerCase{
 		args: []string{
 			"--myflag=bar",
 		},
-		wantPostParse: map[string]interface{}{
-			"myflag": "bar",
+		wantStruct: struct{
+			S string `flagname:"myflag"`
+		}{
+			S: "bar",
 		},
 		opts: []Option{TagName("flagname")},
 	},
@@ -413,17 +457,19 @@ var tests []registerCase = []registerCase{
 		args: []string{
 			"--lib_myflag=bar",
 		},
-		wantPostParse: map[string]interface{}{
-			"lib_myflag": "bar",
+		wantStruct: struct{
+			S string `flag:"myflag"`
+		}{
+			S: "bar",
 		},
 		opts: []Option{FlagPrefix("lib_")},
 	},
 }
 
-func TestRegisterFlags(t *testing.T) {
+func TestRegisterAndLoadFlags(t *testing.T) {
 	for _, tc := range tests {
-		if err := runRegisterCase(tc); err != nil {
-			t.Errorf("TestRegisterFlags %q failed: %v", tc.desc, err)
+		if err := runTestCase(tc); err != nil {
+			t.Errorf("TestRegisterAndLoadFlags %q failed: %v", tc.desc, err)
 		}
 	}
 }

@@ -58,13 +58,7 @@ type options struct {
 	ftypes  map[reflect.Type]FlagGetterFactory
 }
 
-func RegisterFlags(flags *flag.FlagSet, s interface{}, opts ...Option) error {
-	v := reflect.ValueOf(s)
-	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("unable to register flags for %q: not a struct type", v.Type())
-	}
-	// Initialize the default options combined with the passed in options.
-	// Passed in options override defaults.
+func getOpts(opts ...Option) options {
 	o := options{
 		ftypes: map[reflect.Type]FlagGetterFactory{},
 	}
@@ -85,6 +79,15 @@ func RegisterFlags(flags *flag.FlagSet, s interface{}, opts ...Option) error {
 	for _, x := range append(default_opts, opts...) {
 		x.set(&o)
 	}
+	return o
+}
+
+func RegisterFlags(flags *flag.FlagSet, s interface{}, opts ...Option) error {
+	v := reflect.ValueOf(s)
+	if v.Kind() != reflect.Struct {
+		return fmt.Errorf("unable to register flags for %q: not a struct type", v.Type())
+	}
+	o := getOpts(opts...)
 	return registerStructFields(flags, v, o)
 }
 
@@ -112,25 +115,88 @@ func registerStructField(flags *flag.FlagSet, sf reflect.StructField, v reflect.
 	
 	tag := sf.Tag.Get(opts.tagName)
 	f, ok := opts.ftypes[v.Type()]
-	if ok {
-		if tag == "" {
-			return fmt.Errorf("no %q tag found", opts.tagName)
+	if !ok {
+		switch v.Type().Kind() {
+		case reflect.Ptr:
+			if v.IsNil() {
+				return errors.New("uninitialized pointer")
+			}
+			return registerStructField(flags, sf, v.Elem(), opts)
+		case reflect.Struct:
+			return registerStructFields(flags, v, opts)
 		}
-		flags.Var(f(v.Interface()), opts.flagPrefix + tag, fmt.Sprintf("Set %s.%s", v.Type(), sf.Name))
-		return nil
+		return errors.New("no flag factory registered")
 	}
-	switch v.Type().Kind() {
-	case reflect.Ptr:
-		if v.IsNil() {
-			return errors.New("uninitialized pointer")
-		}
-		return registerStructField(flags, sf, v.Elem(), opts)
-	case reflect.Struct:
-		return registerStructFields(flags, v, opts)
+	if tag == "" {
+		return fmt.Errorf("no %q tag found", opts.tagName)
 	}
-	return errors.New("no flag factory registered")
+	flags.Var(f(v.Interface()), opts.flagPrefix + tag, fmt.Sprintf("Set %s.%s", v.Type(), sf.Name))
+	return nil
 }
 
-func LoadFromFlags(flags *flag.FlagSet, s interface{}) error {
+func LoadFromFlags(flags *flag.FlagSet, s interface{}, opts ...Option) error {
+	v := reflect.ValueOf(s)
+	if v.Kind() != reflect.Ptr || v.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("unable to load from flags for %q: not a pointer to a struct", v.Type())
+	}
+	if !v.Elem().CanSet() {
+		return fmt.Errorf("unable to load from flags for %q: struct is not settable", v.Type())
+	}
+	o := getOpts(opts...)
+	return loadFromStructFields(flags, v.Elem(), o)
+}
+
+func loadFromStructFields(flags *flag.FlagSet, v reflect.Value, opts options) error {
+	hasExportedField := false
+	typ := v.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		sf := typ.Field(i)
+		if sf.PkgPath != "" {
+			// skip non-exported fields
+			continue
+		}
+		hasExportedField = true
+		if err := loadFromStructField(flags, sf, v.Field(i), opts); err != nil {
+			return fmt.Errorf("unable to load flag for field %s.%s: %v", typ, sf.Name, err)
+		}
+	}
+	if !hasExportedField {
+		return fmt.Errorf("unable to load flags for type %q: no exported fields", typ)
+	}
+	return nil
+}
+
+func loadFromStructField(flags *flag.FlagSet, sf reflect.StructField, v reflect.Value, opts options) error {
+	_, ok := opts.ftypes[v.Type()]
+	if !ok {
+		switch v.Type().Kind() {
+		case reflect.Ptr:
+			next := reflect.New(v.Type().Elem())
+			err := loadFromStructField(flags, sf, next.Elem(), opts)
+			if err != nil {
+				return err
+			}
+			v.Set(next)
+			return nil
+		case reflect.Struct:
+			return loadFromStructFields(flags, v, opts)
+		}
+		return errors.New("no flag factory registered")
+	}
+	tag := sf.Tag.Get(opts.tagName)
+	if tag == "" {
+		return fmt.Errorf("no %q tag found", opts.tagName)
+	}
+	flagName := opts.flagPrefix + tag
+	flg := flags.Lookup(flagName)
+	if flg == nil {
+		return fmt.Errorf("unable to lookup flag %q. Was RegisterFlags called?", flagName)
+	}
+	flgVal := flg.Value
+	flagGetter, ok := flgVal.(flag.Getter)
+	if !ok {
+		return fmt.Errorf("flag %q doesn't implement the flag.Getter interface", flagName)
+	}
+	v.Set(reflect.ValueOf(flagGetter.Get()))
 	return nil
 }
