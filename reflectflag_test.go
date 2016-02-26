@@ -289,15 +289,6 @@ var tests []testCase = []testCase{
 		},
 	},
 	{
-		desc: "fail on uninitialized ptr",
-		testStruct: struct {
-			Field1 *string `flag:"field1"`
-		}{
-			Field1: nil,
-		},
-		wantRegisterErr: errors.New(`unable to register flag for field struct { Field1 *string "flag:\"field1\"" }.Field1: uninitialized pointer`),
-	},
-	{
 		desc: "nested structs",
 		testStruct: struct {
 			Field1 string `flag:"field1"`
@@ -335,23 +326,6 @@ var tests []testCase = []testCase{
 		},
 	},
 	{
-		desc: "nested struct without public fields",
-		testStruct: struct{
-			Field1 string `flag:"field1"`
-			Nested struct{
-				privField string
-			}
-		}{
-			Field1: "foo",
-			Nested: struct{
-				privField string
-			}{
-				privField: "foo",
-			},
-		},
-		wantRegisterErr: errors.New(`unable to register flag for field struct { Field1 string "flag:\"field1\""; Nested struct { privField string } }.Nested: unable to register flags for type "struct { privField string }": no exported fields`),
-	},
-	{
 		desc: "overflow int32",
 		testStruct: struct{
 			I int32 `flag:"i"`
@@ -387,22 +361,24 @@ var tests []testCase = []testCase{
 		wantRegisterErr: errors.New(`unable to register flags for "string": not a struct type`),
 	},
 	{
-		desc: "fail missing flag tag",
+		desc: "fail unknown type",
 		testStruct: struct{
-			S string
+			S *customType `flag:"custom"`
 		}{
-			S: "foo",
+			S: newCustomType("foo"),
 		},
-		wantRegisterErr: errors.New(`unable to register flag for field struct { S string }.S: no "flag" tag found`),
-	},
-	{
-		desc: "fail no exported fields",
-		testStruct: struct{
-			s string 
+		wantPreParse: map[string]interface{}{
+			"custom":      newCustomType("foo"),
+		},
+		args: []string{
+			"--custom=bar",
+		},
+		wantStruct: struct{
+			S *customType `flag:"custom"`
 		}{
-			s: "foo",
+			S: newCustomType("bar"),
 		},
-		wantRegisterErr: errors.New(`unable to register flags for type "struct { s string }": no exported fields`),
+		wantRegisterErr: errors.New(`unable to register flag for field struct { S *reflectflag.customType "flag:\"custom\"" }.S: no flag factory registered`),
 	},
 	{
 		desc: "test customType",
@@ -470,6 +446,81 @@ func TestRegisterAndLoadFlags(t *testing.T) {
 	for _, tc := range tests {
 		if err := runTestCase(tc); err != nil {
 			t.Errorf("TestRegisterAndLoadFlags %q failed: %v", tc.desc, err)
+		}
+	}
+}
+
+func TestDerefFully(t *testing.T) {
+	for _, tc := range []struct{
+		in interface{}
+		want interface{}
+	}{
+		{
+			in: "foo",
+			want: "foo",
+		},
+		{
+			in: ptrTo("foo"),
+			want: "foo",
+		},
+		{
+			in: ptrTo(ptrTo("foo")),
+			want: "foo",
+		},
+	} {
+		got := derefFully(reflect.ValueOf(tc.in)).Interface()
+		if !deepEqual(got, tc.want) {
+			t.Errorf("unexpected output from derefFully: got %v want %v", got, tc.want)
+		}
+	}
+}
+
+func TestConvertValueTo(t *testing.T) {
+	for _, tc := range []struct{
+		in interface{}
+		want interface{}
+		wantErr error
+	}{
+		{
+			in: "foo",
+			want: "foo",
+		},
+		{
+			in: ptrTo("foo"),
+			want: "foo",
+		},
+		{
+			in: ptrTo(ptrTo("foo")),
+			want: "foo",
+		},
+		{
+			in: "foo",
+			want: ptrTo(ptrTo("foo")),
+		},
+		{
+			in: ptrTo("foo"),
+			want: ptrTo(ptrTo("foo")),
+		},
+		{
+			in: (**string)(nil),
+			want: "",
+		},
+		{
+			in: ptrTo("foo"),
+			want: ptrTo(ptrTo(int(3))),
+			wantErr: errors.New(`cannot convert between *string and **int: differ by more than pointer indirection`),
+		},
+	} {
+		v, err := convertValueTo(reflect.ValueOf(tc.in), reflect.TypeOf(tc.want))
+		if fmt.Sprintf("%v", err) != fmt.Sprintf("%v", tc.wantErr) {
+			t.Errorf("unexpected error from convertValueTo: got %v want %v", err, tc.wantErr)
+		}
+		if err != nil {
+			continue
+		}
+		got := v.Interface()
+		if !deepEqual(got, tc.want) {
+			t.Errorf("unexpected output from convertValueTo: got %v want %v", got, tc.want)
 		}
 	}
 }
