@@ -27,6 +27,7 @@ func FlagPrefix(prefix string) Option {
 }
 
 type flagPrefixOpt string
+
 func (o flagPrefixOpt) set(opts *options) {
 	opts.flagPrefix = string(o)
 }
@@ -53,9 +54,9 @@ func (o flagTypeOpt) set(opts *options) {
 }
 
 type options struct {
-	tagName string
+	tagName    string
 	flagPrefix string
-	ftypes  map[reflect.Type]FlagGetterFactory
+	ftypes     map[reflect.Type]FlagGetterFactory
 }
 
 func getOpts(opts ...Option) options {
@@ -115,11 +116,30 @@ func registerStructField(flags *flag.FlagSet, sf reflect.StructField, v reflect.
 		}
 		return nil
 	}
-	f, fv := factoryForValue(v, opts)
-	if f == nil {
-		return errors.New("no flag factory registered")
+	if fg := flagGetterForValue(v, opts); fg != nil {
+		flags.Var(fg, opts.flagPrefix+tag, fmt.Sprintf("Set %s.%s", v.Type(), sf.Name))
+		return nil
 	}
-	flags.Var(f(fv.Interface()), opts.flagPrefix + tag, fmt.Sprintf("Set %s.%s", v.Type(), sf.Name))
+	derefV := derefFully(v)
+	if derefV.Kind() != reflect.Slice {
+		return fmt.Errorf("no flag factory registered for %v", v.Type())
+	}
+	sv := &sliceValue{}
+	for i := 0; i < derefV.Len(); i++ {
+		e := derefV.Index(i)
+		sv.f = flagGetterForValue(e, opts)
+		if sv.f == nil {
+			return fmt.Errorf("no flag factory registered for %v", e.Type())
+		}
+		sv.values = append(sv.values, sv.f.String())
+	}
+	if sv.f == nil {
+		sv.f = flagGetterForValue(reflect.Zero(derefV.Type().Elem()), opts)
+		if sv.f == nil {
+			return fmt.Errorf("no flag factory registered for %v", derefV.Type().Elem())
+		}
+	}
+	flags.Var(sv, opts.flagPrefix+tag, fmt.Sprintf("Set %s.%s", v.Type, sf.Name))
 	return nil
 }
 
@@ -159,26 +179,38 @@ func loadFromStructField(flags *flag.FlagSet, sf reflect.StructField, v reflect.
 		}
 		return nil
 	}
-	f, _ := factoryForValue(v, opts)
-	if f == nil {
-		return errors.New("no flag factory registered")
-	}
 	flagName := opts.flagPrefix + tag
 	flg := flags.Lookup(flagName)
 	if flg == nil {
 		return fmt.Errorf("unable to lookup flag %q. Was RegisterFlags called?", flagName)
 	}
 	flgVal := flg.Value
-	flagGetter, ok := flgVal.(flag.Getter)
-	if !ok {
+	switch flagGetter := flgVal.(type) {
+	case *sliceValue:
+		if v.Type().Kind() != reflect.Slice {
+			return fmt.Errorf("mismatched flag and field type. Flag %q is a slice, field is %v", flagName, v.Type())
+		}
+		flgValues := flagGetter.Get().([]interface{})
+		newValues := reflect.MakeSlice(reflect.SliceOf(v.Type().Elem()), 0, len(flgValues))
+		for _, fv := range flgValues {
+			newV, err := convertValueTo(reflect.ValueOf(fv), v.Type().Elem())
+			if err != nil {
+				return err
+			}
+			newValues = reflect.Append(newValues, newV)
+		}
+		v.Set(newValues)
+	case flag.Getter:
+		newV, err := convertValueTo(reflect.ValueOf(flagGetter.Get()), v.Type())
+		if err != nil {
+			return err
+		}
+		v.Set(newV)
+		return nil
+	default:
 		return fmt.Errorf("flag %q doesn't implement the flag.Getter interface", flagName)
 	}
-	newV, err := convertValueTo(reflect.ValueOf(flagGetter.Get()), v.Type())
-	if err != nil {
-		return err
-	}
-	v.Set(newV)
-	return nil
+	return nil // unreachable
 }
 
 // derefFully dereferences pointer values until it reaches a non-pointer value.
@@ -241,17 +273,15 @@ func convertValueTo(v reflect.Value, typ reflect.Type) (reflect.Value, error) {
 	return reflect.Zero(typ), errors.New("unreachable")
 }
 
-// factoryForValue returns the registered flag factory for the specified value
-// and the value that should be provided to the factory function on flag
-// initialization. If no flag factory is registered for the specified type the
-// returned factory will be nil.
-func factoryForValue(v reflect.Value, opts options) (FlagGetterFactory, reflect.Value) {
+// flagGetterForValue returns the flag.Getter for the specified value. If no
+// flag factory is registered for the value nil will be returned.
+func flagGetterForValue(v reflect.Value, opts options) flag.Getter {
 	for typ, factory := range opts.ftypes {
 		cv, err := convertValueTo(v, typ)
 		if err != nil {
 			continue
 		}
-		return factory, cv
+		return factory(cv.Interface())
 	}
-	return nil, v
+	return nil
 }

@@ -1,9 +1,13 @@
 package reflectflag
 
 import (
+	"bytes"
+	"encoding/csv"
 	"flag"
 	"fmt"
+	"io"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -190,3 +194,45 @@ func (d *durationValue) Set(val string) error {
 func (d *durationValue) Get() interface{} { return time.Duration(*d) }
 
 func (d *durationValue) String() string { return (*time.Duration)(d).String() }
+
+type sliceValue struct {
+	f      flag.Getter
+	values []string
+}
+
+func (sv *sliceValue) Set(val string) error {
+	r := csv.NewReader(strings.NewReader(val))
+	records, err := r.Read()
+	if err != nil {
+		if err != io.EOF {
+			return err
+		}
+		sv.values = nil
+		return nil
+	}
+	for _, v := range records {
+		err := sv.f.Set(v)
+		if err != nil {
+			return err
+		}
+	}
+	sv.values = records
+	return nil
+}
+
+func (sv *sliceValue) Get() interface{} {
+	var ret []interface{}
+	for _, v := range sv.values {
+		sv.f.Set(v)
+		ret = append(ret, sv.f.Get())
+	}
+	return ret
+}
+
+func (sv *sliceValue) String() string {
+	var buffer bytes.Buffer
+	w := csv.NewWriter(&buffer)
+	w.Write(sv.values)
+	w.Flush()
+	return buffer.String()
+}
