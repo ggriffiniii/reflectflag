@@ -1,3 +1,5 @@
+// Package reflectflag provides a convenient way to define a struct and
+// associate flags with various struct fields.
 package reflectflag
 
 import (
@@ -8,10 +10,15 @@ import (
 	"time"
 )
 
+// Option configures how the structure is to be converted to and from flags.
+// The same set of options should be provided to RegisterFlags and
+// LoadFromFlags for a given struct.
 type Option interface {
 	set(*options)
 }
 
+// TagName specifies which struct tag provides the flag name to use. If TagName
+// is not specified it defaults to "flag".
 func TagName(tag string) Option {
 	return tagOpt(tag)
 }
@@ -22,6 +29,7 @@ func (o tagOpt) set(opts *options) {
 	opts.tagName = string(o)
 }
 
+// FlagPrefix adds a prefix to the flags created.
 func FlagPrefix(prefix string) Option {
 	return flagPrefixOpt(prefix)
 }
@@ -37,6 +45,13 @@ func (o flagPrefixOpt) set(opts *options) {
 // invoked with an interface that matches the registered type.
 type FlagGetterFactory func(interface{}) flag.Getter
 
+// FlagType registers a new type. By default strings, boolean, integer,
+// floating point, and time.Duration values are understood. Registering a new
+// type will allow the specified type (or any pointer indirection of the type),
+// to be used as struct fields or as elements within a slice. The flag.Getter
+// returned by the FlagGetterFactory should return a "deep copy" of the flag
+// value when Get() is invoked. This ensures that return values of
+// LoadFromFlags will not share values between invocations unexpectedly.
 func FlagType(typ interface{}, factory FlagGetterFactory) Option {
 	return flagTypeOpt{
 		typ:     reflect.TypeOf(typ),
@@ -83,6 +98,7 @@ func getOpts(opts ...Option) options {
 	return o
 }
 
+// RegisterFlags adds the flags associated with a struct to the Flagset.
 func RegisterFlags(flags *flag.FlagSet, s interface{}, opts ...Option) error {
 	v := reflect.ValueOf(s)
 	if v.Kind() != reflect.Struct {
@@ -143,6 +159,7 @@ func registerStructField(flags *flag.FlagSet, sf reflect.StructField, v reflect.
 	return nil
 }
 
+// LoadFromFlags populates s with the current values of the flags in the FlagSet.
 func LoadFromFlags(flags *flag.FlagSet, s interface{}, opts ...Option) error {
 	v := reflect.ValueOf(s)
 	if v.Kind() != reflect.Ptr || v.Elem().Kind() != reflect.Struct {
